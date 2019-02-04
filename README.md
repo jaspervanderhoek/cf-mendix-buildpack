@@ -149,6 +149,13 @@ or:
     cf set-env <YOUR_APP> X_FRAME_OPTIONS "ALLOW-FROM https://example.com/"
 
 
+### Configuring Strict SSL Connection headers
+
+To request strict SSL transport you can add the header `Strict-Transport-Security`. See [this Mozilla page](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security) for details. This header is commonly added at the proxy that presents the SSL certificate. You can also chose to enable this header from the container,  when running on Bluemix you will need to enable to setting. There should be a valid SSL certificate on the URL for this header to work. This can be configured via het `STRICT_TRANSPORT_SECURITY` environment variable and passing the maximum age you'd like to have in the header. For example:
+
+    cf set-env <YOUR_APP> STRICT_TRANSPORT_SECURITY 7884000
+
+
 ### Horizontal Scaling
 
 There are two ways for horizontal scaling in Mendix. In Mendix 5.15+ you can use sticky sessions. Mendix 7 brings this even further by no longer requiring a state store. See below on how to activate these settings, based on the Mendix version you use.

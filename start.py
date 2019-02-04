@@ -166,7 +166,14 @@ def set_up_nginx_files(m2ee):
     if x_frame_options == "ALLOW":
         x_frame_options = ""
     else:
-        x_frame_options = "add_header X-Frame-Options '%s';" % x_frame_options
+        x_frame_options = "add_header X-Frame-Options '%s';  \r\n    add_header X-XSS-Protection 1; " % x_frame_options
+
+    strict_transport_security = os.environ.get("STRICT_TRANSPORT_SECURITY", "0")  # A normal value is: 7884000
+    if strict_transport_security.lower() == "0":
+        strict_transport_security = ""
+    else:
+        strict_transport_security = "add_header Strict-Transport-Security max-age = %s; " % strict_transport_security
+    
     if use_instadeploy(m2ee.config.get_runtime_version()):
         mxbuild_upstream = "proxy_pass http://mendix_mxbuild"
     else:
@@ -181,6 +188,7 @@ def set_up_nginx_files(m2ee):
         .replace("DEPLOY_PORT", str(get_deploy_port()))
         .replace("ROOT", os.getcwd())
         .replace("XFRAMEOPTIONS", x_frame_options)
+        .replace("STRICT_TRANSPORT_SECURITY", strict_transport_security)
         .replace("MXBUILD_UPSTREAM", mxbuild_upstream)
     )
     for line in lines.split("\n"):
