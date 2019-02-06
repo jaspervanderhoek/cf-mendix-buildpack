@@ -166,7 +166,7 @@ def set_up_nginx_files(m2ee):
     if x_frame_options == "ALLOW":
         x_frame_options = ""
     else:
-        x_frame_options = "add_header X-Frame-Options '%s';  \r\n    add_header X-XSS-Protection 1; " % x_frame_options
+        x_frame_options = "add_header X-Frame-Options '%s';  \n    add_header X-XSS-Protection 1; " % x_frame_options
 
     strict_transport_security = os.environ.get("STRICT_TRANSPORT_SECURITY", "0")  # A normal value is: 7884000
     if strict_transport_security.lower() == "0":
