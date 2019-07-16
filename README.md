@@ -62,6 +62,14 @@ Now we need to push the application once more.
 
 You can now log in to your application with the configured admin password.
 
+For PostgreSQL we support setting additional parameters in the connection uri retrieved from the VCAP. To set additional JDBC parameters set the `DATABASE_CONNECTION_PARAMS` environment variable as JSON key-value string.
+
+```
+cf set-env <YOUR_APP> DATABASE_CONNECTION_PARAMS '{"tcpKeepAlive": "true", "connectionTimeout": 30, "loginTimeout": 15}'
+```
+
+Note: if you set `DATABASE_URL` provide it as JDBC connection string (prefixed with `jdbc:` and including parameters, `DATABASE_CONNECTION_PARAMS` is not needed then.
+
 
 ### Configuring Constants
 
@@ -140,13 +148,15 @@ If the setting contains a dot `.` you can use an underscore `_` in the environme
 
 ### Configuring HTTP headers
 
-To prevent clickjacking, the `X-Frame-Options` header can be configured. See [this Mozilla page](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options) for all supported options. This can be configured via het `X_FRAME_OPTIONS` environment variable. For example:
+HTTP headers allow the client and the server to pass additional information with the request or the response which defines the operating parameters of an HTTP transaction. Few of the response headers can be configured via `HTTP_RESPONSE_HEADERS` environment variable and setting a JSON string value to configure multiple supported headers. See [Environment Details - Developer Portal Guide | Mendix Documentation Section 4.2](https://docs.mendix.com/developerportal/deploy/environments-details) for all supported headers and options.
 
-    cf set-env <YOUR_APP> X_FRAME_OPTIONS SAMEORIGIN
+For example, to configure `X-Frame-Options`, you can set `HTTP_RESPONSE_HEADERS` environment variable like below:
 
-or:
+    cf set-env <YOUR_APP> HTTP_RESPONSE_HEADERS '{"X-Frame-Options": "allow-from https://mendix.com"}'
 
-    cf set-env <YOUR_APP> X_FRAME_OPTIONS "ALLOW-FROM https://example.com/"
+to configure multiple supported headers, you can set it like below:
+
+    cf set-env <YOUR_APP> HTTP_RESPONSE_HEADERS '{"Referrer-Policy": "no-referrer-when-downgrade", "X-Content-Type-Options": "nosniff"}'
 
 
 ### Configuring Strict SSL Connection headers
@@ -365,7 +375,7 @@ If you use the `cf push` commands as described above, you will always use the la
 
 However, if you need to exercise a high degree of control over your deployments, it is possible to pin a specific version of the buildpack. This will prevent you from being affected by bugs that are inadvertently introduced, but you will need to set up a procedure to regularly move to new versions of the buildpack.
 
-To push with a specific version of the buildpack, append `#<tag>` to the buildpack URL in your `cf push` command like so: 
+To push with a specific version of the buildpack, append `#<tag>` to the buildpack URL in your `cf push` command like so:
 
     cf push <YOUR_APP> -b https://github.com/mendix/cf-mendix-buildpack#v1.9.2 -p <YOUR_MDA>.mda -t 180
 

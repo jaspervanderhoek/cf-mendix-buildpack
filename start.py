@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 import atexit
 import base64
-import codecs
 import datetime
-import itertools
 import json
 import logging
 import os
@@ -18,39 +16,29 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, "lib")
+import requests  # noqa: E402
+
 import buildpackutil  # noqa: E402
-import telegraf  # noqa: E402
+import database_config  # noqa: E402
 import datadog  # noqa: E402
 import instadeploy  # noqa: E402
-import requests  # noqa: E402
+import telegraf  # noqa: E402
 
 from m2ee import M2EE, logger  # noqa: E402
 from nginx import get_path_config, gen_htpasswd  # noqa: E402
 from buildpackutil import i_am_primary_instance  # noqa: E402
 
-HEARTBEAT_SOURCE_STRING = """Gur Mra bs Clguba, ol Gvz Crgref
-Ornhgvshy vf orggre guna htyl.
-Rkcyvpvg vf orggre guna vzcyvpvg.
-Fvzcyr vf orggre guna pbzcyrk.
-Pbzcyrk vf orggre guna pbzcyvpngrq.
-Syng vf orggre guna arfgrq.
-Fcnefr vf orggre guna qrafr.
-Ernqnovyvgl pbhagf.
-Fcrpvny pnfrf nera'g fcrpvny rabhtu gb oernx gur ehyrf.
-Nygubhtu cenpgvpnyvgl orngf chevgl.
-Reebef fubhyq arire cnff fvyragyl.
-Hayrff rkcyvpvgyl fvyraprq.
-Va gur snpr bs nzovthvgl, ershfr gur grzcgngvba gb thrff.
-Gurer fubhyq or bar-- naq cersrenoyl bayl bar --boivbhf jnl gb qb vg.
-Nygubhtu gung jnl znl abg or boivbhf ng svefg hayrff lbh'er Qhgpu.
-Abj vf orggre guna arire.
-Nygubhtu arire vf bsgra orggre guna *evtug* abj.
-Vs gur vzcyrzragngvba vf uneq gb rkcynva, vg'f n onq vqrn.
-Vs gur vzcyrzragngvba vf rnfl gb rkcynva, vg znl or n tbbq vqrn.
-Anzrfcnprf ner bar ubaxvat terng vqrn -- yrg'f qb zber bs gubfr!"""
-HEARTBEAT_STRING_LIST = codecs.encode(HEARTBEAT_SOURCE_STRING, "rot13").split(
-    "\n"
-)
+BUILDPACK_VERSION = "3.4.0"
+
+DEFAULT_HEADERS = {
+    "X-Frame-Options": "(?i)(^allow-from https?://([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])(\.([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9]))*(:\d+)?$|^deny$|^sameorigin$)",  # noqa: E501
+    "Referrer-Policy": "(?i)(^no-referrer$|^no-referrer-when-downgrade$|^origin|origin-when-cross-origin$|^same-origin|strict-origin$|^strict-origin-when-cross-origin$|^unsafe-url$)",  # noqa: E501
+    "Access-Control-Allow-Origin": "(?i)(^\*$|^null$|^https?://([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])(\.([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9]))*(:\d+)?$)",  # noqa: E501
+    "X-Content-Type-Options": "(?i)(^nosniff$)",
+    "Content-Security-Policy": "[a-zA-Z0-9:;/''\"\*_\- \.\n?=%&]+",
+    "X-Permitted-Cross-Domain-Policies": "(?i)(^all$|^none$|^master-only$|^by-content-type$|^by-ftp-filename$)",  # noqa: E501
+    "X-XSS-Protection": "(?i)(^0$|^1$|^1; mode=block$|^1; report=https?://([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])(\.([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9]))*(:\d+)?$)",  # noqa: E501
+}
 
 logger.setLevel(buildpackutil.get_buildpack_loglevel())
 
@@ -66,7 +54,8 @@ def get_current_buildpack_commit():
 
 
 logger.info(
-    "Started Mendix Cloud Foundry Buildpack v2.2.6 [commit:%s]",
+    "Started Mendix Cloud Foundry Buildpack v%s [commit:%s]",
+    BUILDPACK_VERSION,
     get_current_buildpack_commit(),
 )
 logging.getLogger("m2ee").propagate = False
@@ -160,6 +149,48 @@ def get_m2ee_password():
     return m2ee_password
 
 
+def parse_headers():
+    header_config = ""
+    headers_from_json = {}
+
+    # this is kept for X-Frame-Options backward compatibility
+    x_frame_options = os.environ.get("X_FRAME_OPTIONS", "ALLOW")
+    if x_frame_options != "ALLOW":
+        headers_from_json["X-Frame-Options"] = x_frame_options
+
+    headers_json = os.environ.get("HTTP_RESPONSE_HEADERS", "{}")
+
+    try:
+        headers_from_json.update(json.loads(headers_json))
+    except Exception as e:
+        logger.error(
+            "Failed to parse HTTP_RESPONSE_HEADERS, due to invalid JSON string: '{}'".format(
+                headers_json
+            ),
+            exc_info=True,
+        )
+        raise
+
+    for header_key, header_value in headers_from_json.items():
+        regEx = DEFAULT_HEADERS[header_key]
+        if regEx and re.match(regEx, header_value):
+            escaped_value = header_value.replace('"', '\\"').replace(
+                "'", "\\'"
+            )
+            header_config += "add_header {} '{}';\n".format(
+                header_key, escaped_value
+            )
+            logger.debug("Added header {} to nginx config".format(header_key))
+        else:
+            logger.warning(
+                "Skipping {} config, value '{}' is not valid".format(
+                    header_key, header_value
+                )
+            )
+
+    return header_config
+
+
 def set_up_nginx_files(m2ee):
     lines = ""
     x_frame_options = os.environ.get("X_FRAME_OPTIONS", "ALLOW")
@@ -174,12 +205,14 @@ def set_up_nginx_files(m2ee):
     else:
         strict_transport_security = "add_header Strict-Transport-Security 'max-age = %s;'; " % strict_transport_security
     
+
     if use_instadeploy(m2ee.config.get_runtime_version()):
         mxbuild_upstream = "proxy_pass http://mendix_mxbuild"
     else:
         mxbuild_upstream = "return 501"
     with open("nginx/conf/nginx.conf") as fh:
         lines = "".join(fh.readlines())
+    http_headers = parse_headers()
     lines = (
         lines.replace("CONFIG", get_path_config())
         .replace("NGINX_PORT", str(get_nginx_port()))
@@ -189,6 +222,7 @@ def set_up_nginx_files(m2ee):
         .replace("ROOT", os.getcwd())
         .replace("XFRAMEOPTIONS", x_frame_options)
         .replace("STRICT_TRANSPORT_SECURITY", strict_transport_security)
+        .replace("HTTP_HEADERS", http_headers)
         .replace("MXBUILD_UPSTREAM", mxbuild_upstream)
     )
     for line in lines.split("\n"):
@@ -317,9 +351,24 @@ def get_constants(metadata):
 def set_jvm_locale(m2ee_section, java_version):
     javaopts = m2ee_section["javaopts"]
 
-    # enable locale for java8 or later
-    if not java_version.startswith("7"):
+    # override locale providers for java8
+    if java_version.startswith("8"):
         javaopts.append("-Djava.locale.providers=JRE,SPI,CLDR")
+
+
+def set_user_provided_java_options(m2ee_section):
+    javaopts = m2ee_section["javaopts"]
+    options = os.environ.get("JAVA_OPTS", None)
+    if options:
+        try:
+            options = json.loads(options)
+        except json.JSONDecodeError as e:
+            logger.error(
+                "Failed to parse JAVA_OPTS, due to invalid JSON.",
+                exc_info=True,
+            )
+            raise
+        javaopts.extend(options)
 
 
 def set_jvm_memory(m2ee_section, vcap, java_version):
@@ -683,7 +732,7 @@ def set_runtime_config(metadata, mxruntime_config, vcap_data, m2ee):
     buildpackutil.mkdir_p(os.path.join(os.getcwd(), "model", "resources"))
     mxruntime_config.update(app_config)
     mxruntime_config.update(
-        buildpackutil.get_database_config(
+        database_config.get_database_config(
             development_mode=is_development_mode()
         )
     )
@@ -838,9 +887,10 @@ def set_up_m2ee_client(vcap_data):
     )
     java_version = buildpackutil.get_java_version(
         m2ee.config.get_runtime_version()
-    )
+    )["version"]
     set_jvm_memory(m2ee.config._conf["m2ee"], vcap_data, java_version)
     set_jvm_locale(m2ee.config._conf["m2ee"], java_version)
+    set_user_provided_java_options(m2ee.config._conf["m2ee"])
     set_jetty_config(m2ee)
     activate_new_relic(m2ee, vcap_data["application_name"])
     activate_appdynamics(m2ee, vcap_data["application_name"])
@@ -929,7 +979,7 @@ def service_backups():
             ]
 
     try:
-        db_config = buildpackutil.get_database_config()
+        db_config = database_config.get_database_config()
         if db_config["DatabaseType"] != "PostgreSQL":
             raise Exception(
                 "Schnapps only supports postgresql, not %s"
@@ -1129,6 +1179,20 @@ def configure_logging(m2ee):
             )
 
 
+def display_java_version():
+    java_version = (
+        subprocess.check_output(
+            [".local/bin/java", "-version"], stderr=subprocess.STDOUT
+        )
+        .decode("utf8")
+        .strip()
+        .split("\n")
+    )
+    logger.info("Using Java version:")
+    for line in java_version:
+        logger.info(line)
+
+
 def display_running_version(m2ee):
     if m2ee.config.get_runtime_version() >= 4.4:
         feedback = m2ee.client.about().get_feedback()
@@ -1171,6 +1235,9 @@ def set_up_instadeploy_if_deploy_password_is_set(m2ee):
             )
             thread.setDaemon(True)
             thread.start()
+
+            if os.path.exists(os.path.expanduser("~/.sourcepush")):
+                instadeploy.send_metadata_to_cloudportal()
         else:
             logger.warning(
                 "Not setting up InstaDeploy because this mendix "
@@ -1200,9 +1267,13 @@ class LoggingHeartbeatEmitterThread(threading.Thread):
         logger.debug(
             "Starting metrics emitter with interval %d", self.interval
         )
-        for line in itertools.cycle(HEARTBEAT_STRING_LIST):
-            logger.info("MENDIX-LOGGING-HEARTBEAT: %s", line)
+        counter = 1
+        while True:
+            logger.info(
+                "MENDIX-LOGGING-HEARTBEAT: Heartbeat number %s", counter
+            )
             time.sleep(self.interval)
+            counter += 1
 
 
 def start_logging_heartbeat():
@@ -1215,6 +1286,7 @@ def start_logging_heartbeat():
 
 
 def complete_start_procedure_safe_to_use_for_restart(m2ee):
+    display_java_version()
     buildpackutil.mkdir_p("model/lib/userlib")
     set_up_logging_file()
     start_app(m2ee)
