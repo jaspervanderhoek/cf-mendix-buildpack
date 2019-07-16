@@ -2,89 +2,15 @@ import errno
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 from distutils.util import strtobool
-from urllib.parse import parse_qs
 
 sys.path.insert(0, "lib")
 
 import requests  # noqa: E402
 
-
-def get_database_config(development_mode=False):
-    if any(
-        [x.startswith("MXRUNTIME_Database") for x in list(os.environ.keys())]
-    ):
-        return {}
-
-    url = get_database_uri_from_vcap()
-    if url is None:
-        url = os.environ["DATABASE_URL"]
-    patterns = [
-        r"(?P<type>[a-zA-Z0-9]+)://(?P<user>[^:]+):(?P<password>[^@]+)@(?P<host>[^/]+)/(?P<dbname>[^?]*)(?P<extra>\?.*)?",  # noqa: E501
-        r"jdbc:(?P<type>[a-zA-Z0-9]+)://(?P<host>[^;]+);database=(?P<dbname>[^;]*);user=(?P<user>[^;]+);password=(?P<password>.*)$",  # noqa: E501
-    ]
-
-    supported_databases = {
-        "postgres": "PostgreSQL",
-        "postgresql": "PostgreSQL",
-        "mysql": "MySQL",
-        "db2": "Db2",
-        "sqlserver": "SQLSERVER",
-    }
-
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match is not None:
-            break
-    else:
-        raise Exception(
-            "Could not parse database credentials from database uri %s" % url
-        )
-
-    database_type_input = match.group("type")
-    if database_type_input not in supported_databases:
-        raise Exception("Unknown database type: %s", database_type_input)
-    database_type = supported_databases[database_type_input]
-
-    config = {
-        "DatabaseType": database_type,
-        "DatabaseUserName": match.group("user"),
-        "DatabasePassword": match.group("password"),
-        "DatabaseHost": match.group("host"),
-        "DatabaseName": match.group("dbname"),
-    }
-
-    if "extra" in match.groupdict() and match.group("extra"):
-        extra = match.group("extra").lstrip("?")
-        jdbc_params = parse_qs(extra)
-        if "sslmode" in jdbc_params:
-            sslmode = jdbc_params["sslmode"]
-            if sslmode and sslmode[0] == "require":
-                config.update({"DatabaseUseSsl": True})
-
-    if development_mode:
-        config.update(
-            {
-                "ConnectionPoolingMaxIdle": 1,
-                "ConnectionPoolingMaxActive": 20,
-                "ConnectionPoolingNumTestsPerEvictionRun": 50,
-                "ConnectionPoolingSoftMinEvictableIdleTimeMillis": 1000,
-                "ConnectionPoolingTimeBetweenEvictionRunsMillis": 1000,
-            }
-        )
-    elif database_type_input == "mysql":
-        config.update(
-            {
-                "ConnectionPoolingNumTestsPerEvictionRun": 50,
-                "ConnectionPoolingSoftMinEvictableIdleTimeMillis": 10000,
-                "ConnectionPoolingTimeBetweenEvictionRunsMillis": 10000,
-            }
-        )
-
-    return config
+from m2ee.version import MXVersion  # noqa: E402
 
 
 def get_vcap_services_data():
@@ -102,43 +28,6 @@ def get_vcap_data():
             "application_uris": ["example.com"],
             "application_name": "My App",
         }
-
-
-def get_database_uri_from_vcap():
-    vcap_services = get_vcap_services_data()
-
-    for service_type_name in (
-        "p-mysql",
-        "p.mysql",
-        "elephantsql",
-        "cleardb",
-        "PostgreSQL",
-        "dashDB",
-        "mariadb",
-        "postgresql",
-        "rds",
-        "postgresql_shared",
-    ):
-        if vcap_services and service_type_name in vcap_services:
-            return vcap_services[service_type_name][0]["credentials"]["uri"]
-    if "azure-sqldb" in vcap_services:
-        return vcap_services["azure-sqldb"][0]["credentials"]["jdbcUrl"]
-
-    for key in vcap_services:
-        try:
-            uri = vcap_services[key][0]["credentials"]["uri"]
-            if key.startswith("rds"):
-                return uri
-            if key.startswith("dashDB"):
-                return uri
-            if uri.startswith("postgres"):
-                return uri
-            if uri.startswith("mysql"):
-                return uri
-        except (TypeError, KeyError):
-            pass
-
-    return None
 
 
 def appdynamics_used():
@@ -209,7 +98,7 @@ def download_and_unpack(url, destination, cache_dir="/tmp/downloads"):
     )
     if file_name.endswith(".tar.gz") or file_name.endswith(".tgz"):
         unpack_cmd = ["tar", "xf", cached_location, "-C", destination]
-        if file_name.startswith(("mono-", "jdk-", "jre-")):
+        if file_name.startswith(("mono-", "jdk-", "jre-", "AdoptOpenJDK-")):
             unpack_cmd.extend(("--strip", "1"))
         subprocess.check_call(unpack_cmd)
     else:
@@ -271,20 +160,33 @@ class NotFoundException(Exception):
 
 
 def get_java_version(mx_version):
-    versions = {"7": "7u80", "8u51": "8u51", "8": "8"}
-    if mx_version >= 6.6:
-        default = "8"
-    elif mx_version >= 5.18:
-        default = "8u51"
+    if mx_version >= MXVersion("8.0.0"):
+        java_version = {
+            "version": os.getenv("JAVA_VERSION", "11.0.3"),
+            "vendor": "AdoptOpenJDK",
+        }
+    elif mx_version >= MXVersion("7.23.1"):
+        java_version = {
+            "version": os.getenv("JAVA_VERSION", "8u202"),
+            "vendor": "AdoptOpenJDK",
+        }
+    elif mx_version >= MXVersion("6.6"):
+        java_version = {
+            "version": os.getenv("JAVA_VERSION", "8u202"),
+            "vendor": "oracle",
+        }
+    elif mx_version >= MXVersion("5.18"):
+        java_version = {
+            "version": os.getenv("JAVA_VERSION", "8u51"),
+            "vendor": "oracle",
+        }
     else:
-        default = "7"
-    main_java_version = os.getenv("JAVA_VERSION", default)
+        java_version = {
+            "version": os.getenv("JAVA_VERSION", "7u80"),
+            "vendor": "oracle",
+        }
 
-    if main_java_version not in list(versions.keys()):
-        raise Exception(
-            "Invalid Java version specified: %s" % main_java_version
-        )
-    return versions[main_java_version]
+    return java_version
 
 
 def get_mpr_file_from_dir(directory):
@@ -304,7 +206,7 @@ def ensure_mxbuild_in_directory(directory, mx_version, cache_dir):
 
     url = os.environ.get("FORCED_MXBUILD_URL")
     if url:
-        # don't ever cache with a FORCED_MXBUILD_URL
+        # don"t ever cache with a FORCED_MXBUILD_URL
         download_and_unpack(url, directory, cache_dir="/tmp/downloads")
     else:
         try:
@@ -384,10 +286,12 @@ def _detect_mono_version(mx_version):
         "Detecting Mono Runtime using mendix version: " + str(mx_version)
     )
 
-    if mx_version < 7:
-        target = "mono-3.10.0"
-    else:
+    if mx_version >= 8:
+        target = "mono-5.20.1.27"
+    elif mx_version >= 7:
         target = "mono-4.6.2.16"
+    else:
+        target = "mono-3.10.0"
     logging.info("Selecting Mono Runtime: " + target)
     return target
 
@@ -433,24 +337,42 @@ def ensure_and_get_mono(mx_version, cache_dir):
     return mono_location
 
 
+def _determine_jdk(mx_version, package="jdk"):
+    java_version = get_java_version(mx_version)
+
+    if java_version["vendor"] == "AdoptOpenJDK":
+        java_version.update({"type": "AdoptOpenJDK-{}".format(package)})
+    else:
+        java_version.update({"type": package})
+
+    return java_version
+
+
+def _compose_jvm_target_dir(jdk):
+    return "usr/lib/jvm/{type}-{version}-{vendor}-x64".format(
+        type=jdk["type"], version=jdk["version"], vendor=jdk["vendor"]
+    )
+
+
+def _compose_jre_url_path(jdk):
+    return "/mx-buildpack/{type}-{version}-linux-x64.tar.gz".format(
+        type=jdk["type"], version=jdk["version"]
+    )
+
+
 def ensure_and_get_jvm(
     mx_version, cache_dir, dot_local_location, package="jdk"
 ):
     logging.debug("Begin download and install java %s" % package)
-    java_version = get_java_version(mx_version)
 
-    rootfs_java_path = "/usr/lib/jvm/jdk-%s-oracle-x64" % java_version
+    jdk = _determine_jdk(mx_version, package)
+
+    rootfs_java_path = "/{}".format(_compose_jvm_target_dir(jdk))
     if not os.path.isdir(rootfs_java_path):
         logging.debug("rootfs without java sdk detected")
         download_and_unpack(
-            get_blobstore_url(
-                "/mx-buildpack/%s-%s-linux-x64.tar.gz"
-                % (package, java_version)
-            ),
-            os.path.join(
-                dot_local_location,
-                "usr/lib/jvm/%s-%s-oracle-x64" % (package, java_version),
-            ),
+            get_blobstore_url(_compose_jre_url_path(jdk)),
+            os.path.join(dot_local_location, _compose_jvm_target_dir(jdk)),
             cache_dir,
         )
     else:
@@ -459,14 +381,61 @@ def ensure_and_get_jvm(
 
     return get_existing_directory_or_raise(
         [
-            "/usr/lib/jvm/jdk-%s-oracle-x64" % java_version,
-            os.path.join(
-                dot_local_location,
-                "usr/lib/jvm/%s-%s-oracle-x64" % (package, java_version),
-            ),
+            "/" + _compose_jvm_target_dir(jdk),
+            os.path.join(dot_local_location, _compose_jvm_target_dir(jdk)),
         ],
         "Java not found",
     )
+
+
+def update_java_cacert(buildpack_dir, jvm_location):
+    logging.debug("Applying Mozilla CA certificates update to JVM cacerts...")
+    cacerts_file = os.path.join(jvm_location, "lib", "security", "cacerts")
+    if not os.path.exists(cacerts_file):
+        logging.warning(
+            "Cannot locate cacerts file {}. Skippiung update of CA certiticates.".format(
+                cacerts_file
+            )
+        )
+        return
+
+    update_cacert_path = os.path.join(buildpack_dir, "lib", "cacert")
+    if not os.path.exists(update_cacert_path):
+        logging.warning(
+            "Cannot locate cacert lib folder {}. Skipping  update of CA certificates.".format(
+                update_cacert_path
+            )
+        )
+        return
+
+    cacert_merged = "cacerts.merged"
+    env = dict(os.environ)
+
+    try:
+        subprocess.check_output(
+            (
+                os.path.join(jvm_location, "bin", "java"),
+                "-jar",
+                os.path.join(update_cacert_path, "keyutil-0.4.0.jar"),
+                "-i",
+                "--new-keystore",
+                cacert_merged,
+                "--password",
+                "changeit",
+                "--import-pem-file",
+                os.path.join(update_cacert_path, "cacert.pem"),
+                "--import-jks-file",
+                "{}:changeit".format(cacerts_file),
+            ),
+            env=env,
+            stderr=subprocess.STDOUT,
+        )
+    except Exception as ex:
+        logging.error("Error applying cacert update: {}".format(ex.output), ex)
+        raise ex
+
+    os.rename(cacert_merged, cacerts_file)
+    logging.debug("Update of cacerts file finished.")
 
 
 def i_am_primary_instance():
